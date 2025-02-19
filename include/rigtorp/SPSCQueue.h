@@ -53,11 +53,34 @@ template <typename T, typename Allocator = std::allocator<T>> class SPSCQueue {
                           decltype(std::declval<Alloc2 &>().allocate_at_least(
                               size_t{}))>> : std::true_type {};
 #endif
+  inline static constexpr bool may_be_used_in_shared_memory =
+      requires { typename Allocator::may_be_used_in_shared_memory; };
+  static_assert(not may_be_used_in_shared_memory ||
+                std::is_trivially_default_constructible_v<Allocator>);
+  static_assert(not may_be_used_in_shared_memory ||
+                std::is_trivially_destructible_v<Allocator>);
 
 public:
+  /**
+   * The default constructor is trivial, which means it does nothing.
+   *
+   * @note  There is no other means of initialization aside from the constructor
+   * that takes a capacity and allocator, and the class is neither moveable nor
+   * copyable, so using this constructor is meaningless.  It's sole purpose is
+   * to allow this type to qualify as an implicit lifetime type.  This
+   * constructor should never be used as it is impossible to safely use such a
+   * constructed object.
+   *
+   * @note  This constructor is only provided when Allocator contains a type
+   * alias named may_be_used_in_shared_memory.
+   */
+  SPSCQueue()
+    requires may_be_used_in_shared_memory
+  = default;
+
   explicit SPSCQueue(const size_t capacity,
                      const Allocator &allocator = Allocator())
-      : capacity_(capacity), allocator_(allocator) {
+      : capacity_(capacity), allocator_(allocator), w_{}, r_{} {
     // The queue needs at least one element
     if (capacity_ < 1) {
       capacity_ = 1;
@@ -71,29 +94,46 @@ public:
 #if defined(__cpp_if_constexpr) && defined(__cpp_lib_void_t)
     if constexpr (has_allocate_at_least<Allocator>::value) {
       auto res = allocator_.allocate_at_least(capacity_ + 2 * kPadding);
-      slots_ = res.ptr;
+      r_.slots_ = w_.slots_ = res.ptr;
       capacity_ = res.count - 2 * kPadding;
     } else {
-      slots_ = std::allocator_traits<Allocator>::allocate(
+      r_.slots_ = w_.slots_ = std::allocator_traits<Allocator>::allocate(
           allocator_, capacity_ + 2 * kPadding);
     }
 #else
-    slots_ = std::allocator_traits<Allocator>::allocate(
+    r_.slots_ = w_.slots_ = std::allocator_traits<Allocator>::allocate(
         allocator_, capacity_ + 2 * kPadding);
 #endif
 
     static_assert(alignof(SPSCQueue<T>) == kCacheLineSize, "");
     static_assert(sizeof(SPSCQueue<T>) >= 3 * kCacheLineSize, "");
-    assert(reinterpret_cast<char *>(&readIdx_) -
-               reinterpret_cast<char *>(&writeIdx_) >=
+    assert(reinterpret_cast<char *>(&r_.readIdx_) -
+               reinterpret_cast<char *>(&w_.writeIdx_) >=
            static_cast<std::ptrdiff_t>(kCacheLineSize));
   }
 
-  ~SPSCQueue() {
+  /**
+   * The trivial destructor does nothing.
+   *
+   * @note  This constructor is only provided when Allocator contains a type
+   * alias named may_be_used_in_shared_memory.
+   */
+  ~SPSCQueue()
+    requires may_be_used_in_shared_memory
+  = default;
+
+  /**
+   * This user-provided destructor will only be present when the Allocator does
+   * not contain a type alias named may_be_used_in_shared_memory.
+   */
+  ~SPSCQueue()
+    requires(not may_be_used_in_shared_memory)
+  {
+    assert(r_.slots_ == w_.slots_);
     while (front()) {
       pop();
     }
-    std::allocator_traits<Allocator>::deallocate(allocator_, slots_,
+    std::allocator_traits<Allocator>::deallocate(allocator_, r_.slots_,
                                                  capacity_ + 2 * kPadding);
   }
 
@@ -104,38 +144,40 @@ public:
   template <typename... Args>
   void emplace(Args &&...args) noexcept(
       std::is_nothrow_constructible<T, Args &&...>::value) {
+    assert(w_.slots_);
     static_assert(std::is_constructible<T, Args &&...>::value,
                   "T must be constructible with Args&&...");
-    auto const writeIdx = writeIdx_.load(std::memory_order_relaxed);
+    auto const writeIdx = w_.writeIdx_.load(std::memory_order_relaxed);
     auto nextWriteIdx = writeIdx + 1;
     if (nextWriteIdx == capacity_) {
       nextWriteIdx = 0;
     }
-    while (nextWriteIdx == readIdxCache_) {
-      readIdxCache_ = readIdx_.load(std::memory_order_acquire);
+    while (nextWriteIdx == w_.readIdxCache_) {
+      w_.readIdxCache_ = r_.readIdx_.load(std::memory_order_acquire);
     }
-    new (&slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
-    writeIdx_.store(nextWriteIdx, std::memory_order_release);
+    new (&w_.slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+    w_.writeIdx_.store(nextWriteIdx, std::memory_order_release);
   }
 
   template <typename... Args>
   RIGTORP_NODISCARD bool try_emplace(Args &&...args) noexcept(
       std::is_nothrow_constructible<T, Args &&...>::value) {
+    assert(w_.slots_);
     static_assert(std::is_constructible<T, Args &&...>::value,
                   "T must be constructible with Args&&...");
-    auto const writeIdx = writeIdx_.load(std::memory_order_relaxed);
+    auto const writeIdx = w_.writeIdx_.load(std::memory_order_relaxed);
     auto nextWriteIdx = writeIdx + 1;
     if (nextWriteIdx == capacity_) {
       nextWriteIdx = 0;
     }
-    if (nextWriteIdx == readIdxCache_) {
-      readIdxCache_ = readIdx_.load(std::memory_order_acquire);
-      if (nextWriteIdx == readIdxCache_) {
+    if (nextWriteIdx == w_.readIdxCache_) {
+      w_.readIdxCache_ = r_.readIdx_.load(std::memory_order_acquire);
+      if (nextWriteIdx == w_.readIdxCache_) {
         return false;
       }
     }
-    new (&slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
-    writeIdx_.store(nextWriteIdx, std::memory_order_release);
+    new (&w_.slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+    w_.writeIdx_.store(nextWriteIdx, std::memory_order_release);
     return true;
   }
 
@@ -166,33 +208,35 @@ public:
   }
 
   RIGTORP_NODISCARD T *front() noexcept {
-    auto const readIdx = readIdx_.load(std::memory_order_relaxed);
-    if (readIdx == writeIdxCache_) {
-      writeIdxCache_ = writeIdx_.load(std::memory_order_acquire);
-      if (writeIdxCache_ == readIdx) {
+    assert(r_.slots_);
+    auto const readIdx = r_.readIdx_.load(std::memory_order_relaxed);
+    if (readIdx == r_.writeIdxCache_) {
+      r_.writeIdxCache_ = w_.writeIdx_.load(std::memory_order_acquire);
+      if (r_.writeIdxCache_ == readIdx) {
         return nullptr;
       }
     }
-    return &slots_[readIdx + kPadding];
+    return &r_.slots_[readIdx + kPadding];
   }
 
   void pop() noexcept {
+    assert(r_.slots_);
     static_assert(std::is_nothrow_destructible<T>::value,
                   "T must be nothrow destructible");
-    auto const readIdx = readIdx_.load(std::memory_order_relaxed);
-    assert(writeIdx_.load(std::memory_order_acquire) != readIdx &&
+    auto const readIdx = r_.readIdx_.load(std::memory_order_relaxed);
+    assert(w_.writeIdx_.load(std::memory_order_acquire) != readIdx &&
            "Can only call pop() after front() has returned a non-nullptr");
-    slots_[readIdx + kPadding].~T();
+    r_.slots_[readIdx + kPadding].~T();
     auto nextReadIdx = readIdx + 1;
     if (nextReadIdx == capacity_) {
       nextReadIdx = 0;
     }
-    readIdx_.store(nextReadIdx, std::memory_order_release);
+    r_.readIdx_.store(nextReadIdx, std::memory_order_release);
   }
 
   RIGTORP_NODISCARD size_t size() const noexcept {
-    std::ptrdiff_t diff = writeIdx_.load(std::memory_order_acquire) -
-                          readIdx_.load(std::memory_order_acquire);
+    std::ptrdiff_t diff = w_.writeIdx_.load(std::memory_order_acquire) -
+                          r_.readIdx_.load(std::memory_order_acquire);
     if (diff < 0) {
       diff += capacity_;
     }
@@ -200,26 +244,67 @@ public:
   }
 
   RIGTORP_NODISCARD bool empty() const noexcept {
-    return writeIdx_.load(std::memory_order_acquire) ==
-           readIdx_.load(std::memory_order_acquire);
+    return w_.writeIdx_.load(std::memory_order_acquire) ==
+           r_.readIdx_.load(std::memory_order_acquire);
   }
 
   RIGTORP_NODISCARD size_t capacity() const noexcept { return capacity_ - 1; }
+
+  /**
+   * Attach the slots pointer for the reader to another memory location.
+   *
+   * This is useful in shared memory situations where the reader
+   * lives in a different process than where the queue was created.  In such
+   * cases, the memory address of the queue can be different in different
+   * processes.
+   */
+  void reattach_reader(T *slots)
+    requires may_be_used_in_shared_memory
+  {
+    r_.slots_ = slots;
+  }
+
+  /**
+   * Attach the slots pointer for the reader to another memory location.
+   *
+   * This is useful in shared memory situations where the reader
+   * lives in a different process than where the queue was created.  In such
+   * cases, the memory address of the queue can be different in different
+   * processes.
+   */
+  void reattach_writer(T *slots)
+    requires may_be_used_in_shared_memory
+  {
+    w_.slots_ = slots;
+  }
 
 private:
 #ifdef __cpp_lib_hardware_interference_size
   static constexpr size_t kCacheLineSize =
       std::hardware_destructive_interference_size;
 #else
+#if defined(__APPLE__) && defined(__aarch64__)
+  static constexpr size_t kCacheLineSize = 128;
+#else
   static constexpr size_t kCacheLineSize = 64;
+#endif
 #endif
 
   // Padding to avoid false sharing between slots_ and adjacent allocations
   static constexpr size_t kPadding = (kCacheLineSize - 1) / sizeof(T) + 1;
 
 private:
+  template <typename U> struct atomic {
+    using type = std::atomic<U>;
+  };
+  template <typename U>
+    requires requires { typename Allocator::Atomic; }
+  struct atomic<U> {
+    using type = typename Allocator::Atomic;
+  };
+  template <typename U> using atomic_t = typename atomic<U>::type;
+
   size_t capacity_;
-  T *slots_;
 #if defined(__has_cpp_attribute) && __has_cpp_attribute(no_unique_address)
   Allocator allocator_ [[no_unique_address]];
 #else
@@ -229,9 +314,15 @@ private:
   // Align to cache line size in order to avoid false sharing
   // readIdxCache_ and writeIdxCache_ is used to reduce the amount of cache
   // coherency traffic
-  alignas(kCacheLineSize) std::atomic<size_t> writeIdx_ = {0};
-  alignas(kCacheLineSize) size_t readIdxCache_ = 0;
-  alignas(kCacheLineSize) std::atomic<size_t> readIdx_ = {0};
-  alignas(kCacheLineSize) size_t writeIdxCache_ = 0;
+  alignas(kCacheLineSize) struct Writer {
+    atomic_t<size_t> writeIdx_;
+    size_t readIdxCache_;
+    T *slots_;
+  } w_;
+  alignas(kCacheLineSize) struct Reader {
+    atomic_t<size_t> readIdx_;
+    size_t writeIdxCache_;
+    T *slots_;
+  } r_;
 };
 } // namespace rigtorp

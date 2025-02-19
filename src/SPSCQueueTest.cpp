@@ -215,5 +215,58 @@ int main(int argc, char *argv[]) {
     std::cout << duration.count() / iter << " ns/iter" << std::endl;
   }
 
+  // Tests for possible shared memory usage
+  {
+    std::vector<int> v;
+    struct Allocator {
+      using value_type = int;
+      using may_be_used_in_shared_memory = void;
+      struct Atomic {
+        std::size_t value;
+        std::size_t load(std::memory_order) { return value; }
+        void store(std::size_t v, std::memory_order) { value = v; }
+      };
+      int *allocate(std::size_t n) {
+        v->resize(n);
+        return v->data();
+      }
+      std::vector<int> *v;
+    };
+    using Q = SPSCQueue<int, Allocator>;
+    static_assert(std::is_default_constructible_v<Q>);
+    static_assert(std::is_trivially_default_constructible_v<Q>);
+    static_assert(std::is_trivially_destructible_v<Q>);
+    Q q(17, Allocator{&v});
+    q.emplace(42);
+    std::size_t padding =
+        std::distance(v.begin(), std::find_if(v.begin(), v.end(),
+                                              [](int x) { return x != 0; }));
+    assert(padding < v.size());
+    assert(42 == v[0 + padding]);
+    q.emplace(86);
+    assert(86 == v[1 + padding]);
+
+    auto v2 = v;
+    q.reattach_writer(v2.data());
+    q.emplace(99);
+    assert(99 == v2[2 + padding]);
+
+    auto p = q.front();
+    assert(p);
+    q.pop();
+    assert(42 == *p);
+
+    p = q.front();
+    assert(p);
+    q.pop();
+    assert(86 == *p);
+
+    q.reattach_reader(v2.data());
+    p = q.front();
+    assert(p);
+    q.pop();
+    assert(99 == *p);
+  }
+
   return 0;
 }
