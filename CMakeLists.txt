@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.6)
 
-project(SPSCQueue VERSION 1.1 LANGUAGES CXX)
+project(RigtorpSPSCQueue VERSION 1.1 LANGUAGES CXX)
 
 add_library(${PROJECT_NAME} INTERFACE)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
+add_library(Rigtorp::SPSCQueue ALIAS ${PROJECT_NAME})
 
 target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_11)
 
@@ -13,6 +14,7 @@ target_include_directories(${PROJECT_NAME} INTERFACE
 
 # Tests and examples
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    add_library(SPSCQueue ALIAS ${PROJECT_NAME})
     if(MSVC)
         add_compile_options(/permissive- /W4)
     else()
