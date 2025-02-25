@@ -41,7 +41,16 @@ SOFTWARE.
 
 namespace rigtorp {
 
-template <typename T, typename Allocator = std::allocator<T>> class SPSCQueue {
+template <typename SlotT, typename Allocator = std::allocator<SlotT>>
+class SPSCQueue {
+  template <typename A, typename = void> struct real_type {
+    using type = SlotT;
+  };
+  template <typename A>
+  struct real_type<A, std::void_t<typename A::value_type::real_type>> {
+    using type = typename A::value_type::real_type;
+  };
+  using T = typename real_type<Allocator>::type;
 
 #if defined(__cpp_if_constexpr) && defined(__cpp_lib_void_t)
   template <typename Alloc2, typename = void>
@@ -105,8 +114,8 @@ public:
         allocator_, capacity_ + 2 * kPadding);
 #endif
 
-    static_assert(alignof(SPSCQueue<T>) == kCacheLineSize, "");
-    static_assert(sizeof(SPSCQueue<T>) >= 3 * kCacheLineSize, "");
+    static_assert(alignof(SPSCQueue<SlotT>) == kCacheLineSize, "");
+    static_assert(sizeof(SPSCQueue<SlotT>) >= 3 * kCacheLineSize, "");
     assert(reinterpret_cast<char *>(&r_.readIdx_) -
                reinterpret_cast<char *>(&w_.writeIdx_) >=
            static_cast<std::ptrdiff_t>(kCacheLineSize));
@@ -155,7 +164,8 @@ public:
     while (nextWriteIdx == w_.readIdxCache_) {
       w_.readIdxCache_ = r_.readIdx_.load(std::memory_order_acquire);
     }
-    new (&w_.slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+    construct(&allocator_, &w_.slots_[writeIdx + kPadding], writeIdx,
+              std::forward<Args>(args)...);
     w_.writeIdx_.store(nextWriteIdx, std::memory_order_release);
   }
 
@@ -176,7 +186,8 @@ public:
         return false;
       }
     }
-    new (&w_.slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+    construct(&allocator_, &w_.slots_[writeIdx + kPadding], writeIdx,
+              std::forward<Args>(args)...);
     w_.writeIdx_.store(nextWriteIdx, std::memory_order_release);
     return true;
   }
@@ -207,7 +218,7 @@ public:
     return try_emplace(std::forward<P>(v));
   }
 
-  RIGTORP_NODISCARD T *front() noexcept {
+  RIGTORP_NODISCARD SlotT *front() noexcept {
     assert(r_.slots_);
     auto const readIdx = r_.readIdx_.load(std::memory_order_relaxed);
     if (readIdx == r_.writeIdxCache_) {
@@ -216,7 +227,7 @@ public:
         return nullptr;
       }
     }
-    return &r_.slots_[readIdx + kPadding];
+    return &allocator_, &r_.slots_[readIdx + kPadding];
   }
 
   void pop() noexcept {
@@ -226,7 +237,7 @@ public:
     auto const readIdx = r_.readIdx_.load(std::memory_order_relaxed);
     assert(w_.writeIdx_.load(std::memory_order_acquire) != readIdx &&
            "Can only call pop() after front() has returned a non-nullptr");
-    r_.slots_[readIdx + kPadding].~T();
+    r_.slots_[readIdx + kPadding].~SlotT();
     auto nextReadIdx = readIdx + 1;
     if (nextReadIdx == capacity_) {
       nextReadIdx = 0;
@@ -258,7 +269,7 @@ public:
    * cases, the memory address of the queue can be different in different
    * processes.
    */
-  void reattach_reader(T *slots)
+  void reattach_reader(SlotT *slots)
     requires may_be_used_in_shared_memory
   {
     r_.slots_ = slots;
@@ -272,7 +283,7 @@ public:
    * cases, the memory address of the queue can be different in different
    * processes.
    */
-  void reattach_writer(T *slots)
+  void reattach_writer(SlotT *slots)
     requires may_be_used_in_shared_memory
   {
     w_.slots_ = slots;
@@ -291,7 +302,7 @@ private:
 #endif
 
   // Padding to avoid false sharing between slots_ and adjacent allocations
-  static constexpr size_t kPadding = (kCacheLineSize - 1) / sizeof(T) + 1;
+  static constexpr size_t kPadding = (kCacheLineSize - 1) / sizeof(SlotT) + 1;
 
 private:
   template <typename U> struct atomic {
@@ -317,12 +328,22 @@ private:
   alignas(kCacheLineSize) struct Writer {
     atomic_t<size_t> writeIdx_;
     size_t readIdxCache_;
-    T *slots_;
+    SlotT *slots_;
   } w_;
   alignas(kCacheLineSize) struct Reader {
     atomic_t<size_t> readIdx_;
     size_t writeIdxCache_;
-    T *slots_;
+    SlotT *slots_;
   } r_;
+
+  template <typename A, typename... ArgTs>
+  static auto construct(A *a, void *addr, std::size_t index, ArgTs &&...args)
+      -> decltype(a->construct(addr, index, std::forward<ArgTs>(args)...)) {
+    return a->construct(addr, index, std::forward<ArgTs>(args)...);
+  }
+  template <typename... ArgTs>
+  static auto construct(void *, void *addr, std::size_t, ArgTs &&...args) {
+    ::new (addr) T(std::forward<ArgTs>(args)...);
+  }
 };
 } // namespace rigtorp
