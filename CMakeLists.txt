@@ -2,6 +2,38 @@ cmake_minimum_required(VERSION 3.6)
 
 project(RigtorpSPSCQueue VERSION 1.1 LANGUAGES CXX)
 
+if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND ${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
+    option(RIGTORP_SPSC_QUEUE_DETERMINE_CACHE_LINE_SIZE
+        "Compute value for RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE if not set"
+        ON)
+else ()
+    option(RIGTORP_SPSC_QUEUE_DETERMINE_CACHE_LINE_SIZE
+        "Compute value for RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE if not set"
+        OFF)
+endif ()
+
+if (NOT RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE AND RIGTORP_SPSC_QUEUE_DETERMINE_CACHE_LINE_SIZE)
+    if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+        execute_process(
+            COMMAND sysctl -n hw.cachelinesize
+            OUTPUT_VARIABLE RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    elseif (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+        execute_process(
+            COMMAND getconf LEVEL1_DCACHE_LINESIZE
+            OUTPUT_VARIABLE RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    else ()
+        message(FATAL_ERROR "Unrecognized CMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}")
+    endif ()
+    message(STATUS
+        "Setting RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE to computed value of "
+        ${RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE}
+    )
+endif ()
+
 add_library(${PROJECT_NAME} INTERFACE)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 add_library(Rigtorp::SPSCQueue ALIAS ${PROJECT_NAME})
@@ -11,6 +43,12 @@ target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_11)
 target_include_directories(${PROJECT_NAME} INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
+
+if (RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE)
+    target_compile_definitions(${PROJECT_NAME} INTERFACE
+        RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE=${RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE}
+    )
+endif ()
 
 # Tests and examples
 if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
