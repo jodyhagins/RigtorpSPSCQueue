@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.6)
 
 project(RigtorpSPSCQueue VERSION 1.1 LANGUAGES CXX)
 
-if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND ${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     option(RIGTORP_SPSC_QUEUE_DETERMINE_CACHE_LINE_SIZE
         "Compute value for RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE if not set"
         ON)
@@ -47,6 +47,10 @@ target_include_directories(${PROJECT_NAME} INTERFACE
 if (RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE)
     target_compile_definitions(${PROJECT_NAME} INTERFACE
         RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE=${RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE}
+    )
+else ()
+    message(WARNING
+        "RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE will be set to a default value."
     )
 endif ()
 

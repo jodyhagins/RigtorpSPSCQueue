@@ -292,9 +292,6 @@ public:
 private:
 #if defined(RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE)
   static constexpr size_t kCacheLineSize = RIGTORP_SPSC_QUEUE_CACHE_LINE_SIZE;
-#elif defined(__cpp_lib_hardware_interference_size)
-  static constexpr size_t kCacheLineSize =
-      std::hardware_destructive_interference_size;
 #elif defined(__APPLE__) && defined(__aarch64__)
   static constexpr size_t kCacheLineSize = 128;
 #else
