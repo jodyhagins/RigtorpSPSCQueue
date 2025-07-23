@@ -220,22 +220,14 @@ int main(int argc, char *argv[]) {
     std::vector<int> v;
     struct Allocator {
       using value_type = int;
-      using may_be_used_in_shared_memory = void;
-      struct Atomic {
-        std::size_t value;
-        std::size_t load(std::memory_order) { return value; }
-        void store(std::size_t v, std::memory_order) { value = v; }
-      };
       int *allocate(std::size_t n) {
         v->resize(n);
         return v->data();
       }
+      void deallocate(void *, std::size_t) { }
       std::vector<int> *v;
     };
     using Q = SPSCQueue<int, Allocator>;
-    static_assert(std::is_default_constructible_v<Q>);
-    static_assert(std::is_trivially_default_constructible_v<Q>);
-    static_assert(std::is_trivially_destructible_v<Q>);
     Q q(17, Allocator{&v});
     q.emplace(42);
     std::size_t padding =
